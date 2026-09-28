@@ -1,6 +1,7 @@
-name: macOS VNC - CLOUDFLARE
+name: macOS Vine VNC - Pinggy
+
 on:
-  workflow_dispatch
+  workflow_dispatch:
 
 jobs:
   build:
@@ -8,62 +9,213 @@ jobs:
     timeout-minutes: 9999
 
     steps:
-      - name: Install Cloudflared
-        run: |
-          brew install cloudflare/cloudflare/cloudflared
-          echo "✅ Cloudflared Installed!"
-
-      - name: Enable VNC/Screen Sharing
-        run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          echo "✅ VNC Enabled!"
-
-      - name: Set VNC Password (Legacy VNC)
+      - name: Download Vine Server 5.3.2
         shell: bash
         run: |
-          set -e
-          # Ensure RemoteManagement directories exist and proper ownership
-          sudo mkdir -p /Library/Preferences
-          # Use kickstart with sudo to set legacy VNC password
-          echo "P@ssw0rd123!" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw P@ssw0rd123!
-          # Also set system VNC password key (some runners require this)
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          HASH=$(python3 - <<'PY'
-import sys,hashlib
-print(hashlib.md5(b"P@ssw0rd123!").hexdigest())
-PY
-)
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo $HASH | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-          echo "✅ VNC Password Set!"
+          set -euo pipefail
 
-      - name: Start Cloudflare Tunnel
+          DMG="$RUNNER_TEMP/VineServer-5.3.2.dmg"
+
+          curl --fail --location --retry 3 \
+            "https://github.com/stweil/OSXvnc/releases/download/V5.3.2/VineServer-5.3.2.dmg" \
+            --output "$DMG"
+
+          test -s "$DMG"
+
+          echo "✅ Vine Server DMG downloaded:"
+          ls -lh "$DMG"
+
+      - name: Install Vine Server
+        shell: bash
         run: |
+          set -euo pipefail
+
+          DMG="$RUNNER_TEMP/VineServer-5.3.2.dmg"
+          MOUNT="$RUNNER_TEMP/vine-mount"
+
+          mkdir -p "$MOUNT"
+
+          hdiutil attach "$DMG" \
+            -mountpoint "$MOUNT" \
+            -nobrowse \
+            -readonly
+
+          APP_PATH=$(find "$MOUNT" \
+            -maxdepth 2 \
+            -type d \
+            -name "*.app" \
+            -print -quit)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Vine Server application was not found."
+            find "$MOUNT" -maxdepth 3 -print
+            hdiutil detach "$MOUNT" || true
+            exit 1
+          fi
+
+          rm -rf "$RUNNER_TEMP/Vine Server.app"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Vine Server.app"
+
+          hdiutil detach "$MOUNT"
+
+          echo "✅ Vine Server installed at:"
+          echo "$RUNNER_TEMP/Vine Server.app"
+
+          echo "Application contents:"
+          find "$RUNNER_TEMP/Vine Server.app/Contents/MacOS" \
+            -maxdepth 1 \
+            -type f \
+            -print
+
+      - name: Start Vine Server
+        shell: bash
+        run: |
+          set -u
+
+          APP="$RUNNER_TEMP/Vine Server.app"
+          MACOS_DIR="$APP/Contents/MacOS"
+          LOG="$RUNNER_TEMP/vine-server.log"
+
+          echo "Vine Server application files:"
+          find "$APP" -maxdepth 6 -type f -print
+
+          echo ""
+          echo "Executable information:"
+          find "$MACOS_DIR" -maxdepth 1 -type f -print -exec file {} \;
+
+          echo ""
+          echo "macOS architecture:"
+          uname -m
+
+          echo ""
+          echo "Trying to locate an actual VNC daemon..."
+
+          VINE_DAEMON=$(find "$APP" \
+            -type f \
+            \( -iname '*server*' -o -iname '*vnc*' -o -iname '*osxvnc*' \) \
+            -perm -111 \
+            ! -name "Vine Server" \
+            -print -quit)
+
+          if [ -z "$VINE_DAEMON" ]; then
+            echo "No separate VNC daemon found."
+            echo "The DMG appears to contain only the Vine Server GUI launcher."
+            echo ""
+            echo "Available executables:"
+            find "$APP" -type f -perm -111 -print
+            exit 1
+          fi
+
+          chmod +x "$VINE_DAEMON"
+
+          echo "Using VNC daemon:"
+          echo "$VINE_DAEMON"
+
+          file "$VINE_DAEMON"
+
+          xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+          "$VINE_DAEMON" \
+            -rfbport 5900 \
+            -rfbnoauth \
+            > "$LOG" 2>&1 &
+
+          VINE_PID=$!
+          echo "$VINE_PID" > vine.pid
+
+          sleep 10
+
+          echo "Vine Server log:"
+          cat "$LOG" || true
+
+          echo ""
+          echo "Listening ports:"
+          sudo lsof -nP -iTCP -sTCP:LISTEN || true
+
+          if ! sudo lsof -nP -iTCP:5900 -sTCP:LISTEN; then
+            echo "❌ Vine Server did not open port 5900."
+
+            if ! kill -0 "$VINE_PID" 2>/dev/null; then
+              echo "The Vine daemon exited."
+            fi
+
+            exit 1
+          fi
+
+          echo "✅ Vine Server is listening on port 5900."
+
+
+      - name: Start Pinggy TCP Tunnel
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          : > tunnel.log
+
+          ssh -p 443 \
+            -R 0:127.0.0.1:5900 \
+            -o ExitOnForwardFailure=yes \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            tcp@free.pinggy.io 2>&1 | tee -a tunnel.log &
+
+          TUNNEL_PID=$!
+          echo "$TUNNEL_PID" > tunnel.pid
+
+          echo "Waiting for Pinggy endpoint..."
+
+          for i in {1..30}; do
+            ENDPOINT=$(grep -Eo 'tcp://[^[:space:]]+' tunnel.log | head -n 1 || true)
+
+            if [ -n "$ENDPOINT" ]; then
+              break
+            fi
+
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "❌ Pinggy tunnel exited."
+              cat tunnel.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          ENDPOINT=$(grep -Eo 'tcp://[^[:space:]]+' tunnel.log | head -n 1 || true)
+
+          if [ -z "$ENDPOINT" ]; then
+            echo "❌ No Pinggy TCP endpoint was received."
+            cat tunnel.log
+            exit 1
+          fi
+
+          echo ""
           echo "============================================"
-          echo "🚀 macOS VNC - CLOUDFLARE TUNNEL"
+          echo "📋 VNC CONNECTION DETAILS"
           echo "============================================"
-          echo ""
-          cloudflared tunnel --url tcp://localhost:5900 > tunnel.log 2>&1 &
-          sleep 15
-          cat tunnel.log | grep -o 'https://[^[:space:]]*trycloudflare.com' || echo "Check logs for tunnel URL"
-          echo ""
-          echo "✅ TUNNEL STARTED!"
-          echo ""
-          echo "📋 CONNECTION DETAILS:"
-          echo "   PASSWORD: P@ssw0rd123!"
-          echo "   OS: macOS Monterey/Ventura"
-          echo "   Architecture: $(uname -m)"
+          echo "Endpoint: $ENDPOINT"
+          echo "Authentication: disabled"
           echo "============================================"
 
       - name: Keep Session Alive
+        shell: bash
         run: |
-          echo "⏳ Session Active - Keeping alive..."
+          set -euo pipefail
+
           while true; do
+            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
+              echo "❌ Pinggy tunnel exited."
+              cat tunnel.log
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat vine.pid)" 2>/dev/null; then
+              echo "❌ Vine Server exited."
+              cat "$RUNNER_TEMP/vine-server.log"
+              exit 1
+            fi
+
             sleep 60
             echo "✓ Active - $(date '+%H:%M:%S')"
           done
