@@ -234,6 +234,6 @@ jobs:
               exit 1
             fi
 
-            sleep 60
             echo "✓ Active - $(date '+%H:%M:%S')"
+            sleep 60
           done
