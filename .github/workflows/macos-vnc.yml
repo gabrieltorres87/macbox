@@ -135,7 +135,7 @@ jobs:
           fi
 
           # Vine's password format supports only the first 8 characters.
-          printf '%s\n' '12345678' | "$STOREPASSWD" "$PASSFILE"
+          "$STOREPASSWD" '12345678' "$PASSFILE"
 
           chmod 600 "$PASSFILE"
 
