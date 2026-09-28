@@ -1,4 +1,4 @@
-name: macOS Vine VNC - Pinggy
+name: macOS VNC
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 9999
+    timeout-minutes: 120
 
     steps:
       - name: Download Vine Server 5.3.2
