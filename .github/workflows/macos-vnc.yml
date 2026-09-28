@@ -228,12 +228,6 @@ jobs:
           set -euo pipefail
 
           while true; do
-            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
-              echo "❌ Pinggy tunnel exited."
-              cat tunnel.log
-              exit 1
-            fi
-
             if ! kill -0 "$(cat vine.pid)" 2>/dev/null; then
               echo "❌ Vine Server exited."
               cat "$RUNNER_TEMP/vine-server.log"
