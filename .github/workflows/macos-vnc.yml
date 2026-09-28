@@ -115,9 +115,33 @@ jobs:
 
           xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
+          VINE_DIR="$(dirname "$VINE_DAEMON")"
+          PASSFILE="$RUNNER_TEMP/vine-vnc.pass"
+
+          STOREPASSWD="$VINE_DIR/storepasswd"
+
+          if [ ! -x "$STOREPASSWD" ]; then
+            STOREPASSWD=$(find "$APP" \
+              -type f \
+              -name "storepasswd" \
+              -perm -111 \
+              -print -quit)
+          fi
+
+          if [ -z "$STOREPASSWD" ] || [ ! -x "$STOREPASSWD" ]; then
+            echo "❌ Vine storepasswd utility was not found."
+            find "$APP" -type f -perm -111 -print
+            exit 1
+          fi
+
+          # Vine's password format supports only the first 8 characters.
+          printf '%s\n' '12345678' | "$STOREPASSWD" "$PASSFILE"
+
+          chmod 600 "$PASSFILE"
+
           "$VINE_DAEMON" \
             -rfbport 5900 \
-            -rfbnoauth \
+            -rfbauth "$PASSFILE" \
             > "$LOG" 2>&1 &
 
           VINE_PID=$!
@@ -195,7 +219,7 @@ jobs:
           echo "📋 VNC CONNECTION DETAILS"
           echo "============================================"
           echo "Endpoint: $ENDPOINT"
-          echo "Authentication: disabled"
+          echo "Authentication: VNC password"
           echo "============================================"
 
       - name: Keep Session Alive
